@@ -316,6 +316,16 @@ defmodule Mox do
 
   """
   def defmock(name, options) when is_atom(name) and is_list(options) do
+    case Keyword.fetch(options, :for_spec) do
+      :error ->
+        behaviour_defmock(name, options)
+
+      {:ok, module} ->
+        module_defmock(name, module, options)
+    end
+  end
+
+  defp behaviour_defmock(name, options) when is_atom(name) and is_list(options) do
     behaviours =
       case Keyword.fetch(options, :for) do
         {:ok, mocks} -> List.wrap(mocks)
@@ -333,6 +343,56 @@ defmodule Mox do
     define_mock_module(name, behaviours, doc_header ++ compile_header ++ mock_funs)
 
     name
+  end
+
+  defp module_defmock(name, module, options) do
+    mock_funs = generate_spec_mock_funs(module)
+
+    moduledoc = Keyword.get(options, :moduledoc, false)
+
+    doc_header = generate_doc_header(moduledoc)
+
+    compile_header =
+      for behaviour <- [module] do
+        quote do
+          @behaviour unquote(behaviour)
+          unquote(behaviour).module_info(:module)
+        end
+      end
+
+    define_mock_module(name, [module], doc_header ++ compile_header ++ mock_funs)
+
+    name
+  end
+
+  defp generate_spec_mock_funs(module) do
+    for {fun, arity} <- for_module(module) do
+      args = 0..arity |> Enum.to_list() |> tl() |> Enum.map(&Macro.var(:"arg#{&1}", Elixir))
+
+      quote do
+        def unquote(fun)(unquote_splicing(args)) do
+          Mox.__dispatch__(__MODULE__, unquote(fun), unquote(arity), unquote(args))
+        end
+      end
+    end
+  end
+
+  defp for_module(module) do
+    {:ok, {^module, [{:abstract_code, {:raw_abstract_v1, attributes}}]}} =
+      module |> :code.which() |> :beam_lib.chunks([:abstract_code])
+
+    attributes
+    |> Enum.filter_map(
+      fn
+        {:attribute, _, :spec, _function_and_types} -> true
+        _attribute -> false
+      end,
+      fn {:attribute, _, :spec, function_and_types} ->
+        function_and_types
+      end
+    )
+    |> Enum.map(fn {{f, a}, _} -> {f, a} end)
+    |> Enum.reject(fn {f, _a} -> f == :__info__ end)
   end
 
   defp validate_behaviour!(behaviour) do
